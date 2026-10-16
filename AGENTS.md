@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-The current checkout contains no application source, tests, or asset directories. Add new code in clearly named, language-appropriate directories (for example, `src/`, `tests/`, and `assets/`) and keep tests or documentation close to the components they describe. Update this guide when the repository gains an established layout.
+This repository is a Rust library crate. `src/lib.rs` is the crate root, `src/cluster/` contains cluster membership and consensus state types, and `schema/` contains the JSON Schema for Xen domain configuration. Architecture notes live in `docs/`. Keep code close to its domain module and update this guide when the layout changes.
 
 ## Build, Test, and Development Commands
 
-No build system or runnable project commands are present yet. When adding a toolchain, document its required runtime and canonical commands in the project README and here. Prefer reproducible commands that work from the repository root, such as `make test` or the package manager's test script; do not document commands until they are configured and verified.
+The project is configured as a Cargo crate in `Cargo.toml`. From the repository root, `cargo fmt --check` checks formatting and `cargo check` compiles the crate. Both commands have been verified with the installed Rust toolchain.
 
 ## Coding Style & Naming Conventions
 
@@ -14,7 +14,7 @@ Follow the conventions of the language and framework introduced by the change. U
 
 ## Testing Guidelines
 
-There is no test framework or test suite in the current checkout. Add focused tests for new behavior alongside the chosen framework, and include the exact command needed to run them in project documentation. Run the relevant checks before proposing a change and report any checks that could not be run.
+No test suite is configured yet. When adding one, keep focused tests alongside the crate or in `tests/`, document the exact command after verifying it, and report checks that could not be run.
 
 ## Commit & Pull Request Guidelines
 

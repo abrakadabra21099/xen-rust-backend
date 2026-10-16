@@ -1,0 +1,13 @@
+[package]
+name = "xen-rust-backend"
+version = "0.1.0"
+edition = "2021"
+description = "Distributed control plane for Xen using the native libxl toolstack"
+license = "MIT"
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[lib]
+name = "xen_rust_backend"
+path = "src/lib.rs"
