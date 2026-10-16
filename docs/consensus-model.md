@@ -65,12 +65,26 @@ These are consensus-facing primitives, not a complete cluster runtime or HTTP
 endpoints. `src/cluster/paxos_storage.rs` provides a node-local SQLite store in
 WAL mode with `synchronous=FULL`. The durable acceptor methods commit promise,
 accepted, and learned state before returning; the store also advances each
-proposer's ballot counter transactionally. SQLite's `FULL` setting synchronizes
-the WAL at transaction commit, subject to the filesystem and storage device
-honoring sync requests. The membership tracker and application/commit index are
-not persisted yet.
+proposer's ballot counter transactionally. Learned slots advance a persistent
+commit index only across the contiguous prefix starting at slot 1, in the same
+transaction that stores the learned certificate. `chosen_value` allows ordered
+replay from that prefix after restart, and `committed_values_after` reads the
+prefix in bounded ordered batches. It rejects cursors beyond the commit index
+and reports missing data inside the prefix as corruption instead of skipping a
+slot. SQLite's `FULL` setting synchronizes the WAL at transaction commit,
+subject to the filesystem and storage device honoring sync requests.
+State-machine application and its index are not persisted yet.
+
+`src/cluster/transport.rs` defines the version 1 cleartext binary message format
+for prepare, promise, accept, accepted, learn, and learned RPCs. It bounds
+message sizes, voter IDs, and certificate lengths and rejects malformed or
+trailing data. `src/cluster/transport/tcp.rs` sends a length-prefixed request
+and matching response over one TCP connection, with read/write timeouts. Its
+server handles one connection at a time per `serve_one` call; the caller owns
+the accept loop and concurrency. Peer authentication and encryption remain
+outside this MVP transport.
 
 A complete runtime still has to coordinate and recover multiple slots in
-order, apply committed values, authenticate and transport RPCs, and expose the
-API on every control-plane node. Client requests may enter on any such node.
-Worker execution and `libxl` integration are also not implemented.
+order, apply committed values, transport RPCs over sockets, authenticate peers,
+and expose the API on every control-plane node. Client requests may enter on any
+such node. Worker execution and `libxl` integration are also not implemented.

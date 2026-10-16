@@ -6,7 +6,7 @@ This repository is a Rust library crate. `src/lib.rs` is the crate root, `src/cl
 
 ## Build, Test, and Development Commands
 
-The project is configured as a Cargo crate in `Cargo.toml`. From the repository root, `cargo fmt --check` checks formatting and `cargo check` compiles the crate. Both commands have been verified with the installed Rust toolchain.
+The project is configured as a Cargo crate in `Cargo.toml`. From the repository root, `cargo fmt --check` checks formatting, `cargo check` compiles the crate, and `cargo test` runs the integration suite. These commands have been verified with the installed Rust toolchain.
 
 ## Coding Style & Naming Conventions
 
@@ -14,7 +14,7 @@ Follow the conventions of the language and framework introduced by the change. U
 
 ## Testing Guidelines
 
-No test suite is configured yet. When adding one, keep focused tests alongside the crate or in `tests/`, document the exact command after verifying it, and report checks that could not be run.
+Integration tests live in `tests/` and cover weighted quorum, membership transitions and commit tracking, leaderless Paxos rounds, and SQLite durability/recovery. Every newly implemented function or behavior must receive comprehensive tests in the same change, including success paths, invalid inputs, boundary conditions, and persistence/recovery cases when applicable. Keep assertions based on protocol and storage invariants; do not weaken expected behavior to match an implementation defect. Run `cargo test` after each implementation change.
 
 ## Commit & Pull Request Guidelines
 

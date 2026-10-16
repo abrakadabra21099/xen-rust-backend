@@ -33,8 +33,8 @@ impl Ballot {
     }
 }
 
-/// Replicated log slot. Slots are agreed independently; callers must only
-/// activate later slots after all required earlier slots have been chosen.
+/// One-based replicated log slot. Slots are agreed independently; callers must
+/// only activate later slots after all required earlier slots have been chosen.
 pub type PaxosSlot = u64;
 
 /// A value previously accepted by an acceptor.
@@ -122,6 +122,7 @@ pub enum AcceptProgress {
 /// Protocol errors for malformed or inconsistent Paxos messages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PaxosError {
+    InvalidSlot,
     NotVoter(VoterId),
     InvalidVoter(QuorumConfigError),
     WrongSlot {
@@ -138,6 +139,7 @@ pub enum PaxosError {
 impl std::fmt::Display for PaxosError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidSlot => write!(f, "Paxos log slots are one-based"),
             Self::NotVoter(id) => write!(f, "node {} is not a voter", id.as_str()),
             Self::InvalidVoter(error) => write!(f, "invalid voter: {error}"),
             Self::WrongSlot { expected, actual } => {
@@ -202,6 +204,7 @@ impl WeightedAcceptor {
         request: PrepareRequest,
         membership: &MembershipQuorum,
     ) -> Result<PromiseResponse, PaxosError> {
+        validate_slot(request.slot)?;
         self.ensure_eligible(&request.ballot, membership)?;
         let state = self.slots.entry(request.slot).or_default();
         if state
@@ -233,6 +236,7 @@ impl WeightedAcceptor {
         membership: &MembershipQuorum,
         store: &mut SqlitePaxosStore,
     ) -> Result<PromiseResponse, PaxosStorageError> {
+        validate_slot(request.slot)?;
         self.ensure_eligible(&request.ballot, membership)?;
         let slot = request.slot;
         let node_id = self.node_id.clone();
@@ -266,6 +270,7 @@ impl WeightedAcceptor {
         request: AcceptRequest,
         membership: &MembershipQuorum,
     ) -> Result<AcceptedResponse, PaxosError> {
+        validate_slot(request.slot)?;
         self.ensure_eligible(&request.ballot, membership)?;
         let state = self.slots.entry(request.slot).or_default();
         if state
@@ -306,6 +311,7 @@ impl WeightedAcceptor {
         membership: &MembershipQuorum,
         store: &mut SqlitePaxosStore,
     ) -> Result<AcceptedResponse, PaxosStorageError> {
+        validate_slot(request.slot)?;
         self.ensure_eligible(&request.ballot, membership)?;
         let slot = request.slot;
         let node_id = self.node_id.clone();
@@ -354,6 +360,7 @@ impl WeightedAcceptor {
         chosen: ChosenValue,
         membership: &MembershipQuorum,
     ) -> Result<(), PaxosError> {
+        validate_slot(chosen.slot)?;
         if !membership.contains_voter(&self.node_id) {
             return Err(PaxosError::NotVoter(self.node_id.clone()));
         }
@@ -391,6 +398,7 @@ impl WeightedAcceptor {
         membership: &MembershipQuorum,
         store: &mut SqlitePaxosStore,
     ) -> Result<(), PaxosStorageError> {
+        validate_slot(chosen.slot)?;
         if !membership.contains_voter(&self.node_id) {
             return Err(PaxosError::NotVoter(self.node_id.clone()).into());
         }
@@ -476,6 +484,7 @@ impl WeightedProposer {
         requested_value: Vec<u8>,
         membership: MembershipQuorum,
     ) -> Result<Self, PaxosError> {
+        validate_slot(slot)?;
         if !membership.contains_voter(&ballot.proposer) {
             return Err(PaxosError::InvalidVoter(QuorumConfigError::UnknownVoter(
                 ballot.proposer.clone(),
@@ -655,5 +664,13 @@ impl WeightedProposer {
             return Err(PaxosError::ConflictingAcceptedValue(highest.ballot.clone()));
         }
         Ok(highest.value.clone())
+    }
+}
+
+fn validate_slot(slot: PaxosSlot) -> Result<(), PaxosError> {
+    if slot == 0 {
+        Err(PaxosError::InvalidSlot)
+    } else {
+        Ok(())
     }
 }
