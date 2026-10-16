@@ -81,8 +81,10 @@ message sizes, voter IDs, and certificate lengths and rejects malformed or
 trailing data. `src/cluster/transport/tcp.rs` sends a length-prefixed request
 and matching response over one TCP connection, with read/write timeouts. Its
 server handles one connection at a time per `serve_one` call; the caller owns
-the accept loop and concurrency. Peer authentication and encryption remain
-outside this MVP transport.
+the accept loop and concurrency. `serve_durable_one` routes inbound messages to
+`DurablePaxosPeer`, which only replies after the acceptor operation and SQLite
+transaction succeed. Peer authentication and encryption remain outside this
+MVP transport.
 
 A complete runtime still has to coordinate and recover multiple slots in
 order, apply committed values, transport RPCs over sockets, authenticate peers,

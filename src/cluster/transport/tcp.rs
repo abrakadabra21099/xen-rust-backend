@@ -7,6 +7,9 @@ use std::{
 };
 
 use super::{PaxosRpc, RpcCodecError, MAX_MESSAGE_BYTES};
+use crate::cluster::{
+    membership_state::MembershipQuorum, paxos_storage::SqlitePaxosStore, peer::DurablePaxosPeer,
+};
 
 /// Failures while sending or serving one framed TCP RPC.
 #[derive(Debug)]
@@ -124,6 +127,20 @@ impl TcpRpcServer {
             return Err(TcpRpcError::MismatchedResponse);
         }
         write_frame(&mut stream, &response)
+    }
+
+    /// Serves one request through a durable local acceptor and replies after its
+    /// storage transaction has committed.
+    pub fn serve_durable_one(
+        &self,
+        peer: &mut DurablePaxosPeer,
+        membership: &MembershipQuorum,
+        store: &mut SqlitePaxosStore,
+    ) -> Result<(), TcpRpcError> {
+        self.serve_one(|request| {
+            peer.handle_rpc(request, membership, store)
+                .map_err(|error| error.to_string())
+        })
     }
 }
 

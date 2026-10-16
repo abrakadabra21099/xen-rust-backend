@@ -4,5 +4,6 @@ pub mod membership_commit;
 pub mod membership_state;
 pub mod paxos;
 pub mod paxos_storage;
+pub mod peer;
 pub mod transport;
 pub mod weighted_quorum;
