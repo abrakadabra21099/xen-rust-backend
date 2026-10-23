@@ -56,6 +56,11 @@ impl DurablePaxosPeer {
         }
     }
 
+    /// Returns the identity this durable acceptor represents.
+    pub fn node_id(&self) -> &VoterId {
+        &self.node_id
+    }
+
     /// Restores durable acceptor state before the node rejoins the voting set.
     pub fn restore(node_id: VoterId, store: &SqlitePaxosStore) -> Result<Self, PaxosStorageError> {
         Ok(Self {

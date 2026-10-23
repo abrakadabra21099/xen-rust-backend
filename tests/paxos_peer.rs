@@ -1,7 +1,15 @@
 mod common;
 
 use common::{stable_quorum, voter, TempDb};
-use std::{net::SocketAddr, thread, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 use xen_rust_backend::cluster::{
     paxos::{
         AcceptRequest, AcceptedResponse, Ballot, ChosenValue, PaxosError, PrepareRequest,
@@ -22,6 +30,76 @@ fn chosen(slot: u64, value: &[u8]) -> ChosenValue {
         value: value.to_vec(),
         acceptors: [voter("a"), voter("b")].into_iter().collect(),
     }
+}
+
+#[test]
+fn long_lived_durable_server_answers_multiple_requests_then_stops_cleanly() {
+    let membership = stable_quorum(&[("a", 1), ("b", 1), ("c", 1)]);
+    let server =
+        TcpRpcServer::bind("127.0.0.1:0".parse().unwrap(), Duration::from_secs(2)).unwrap();
+    let address = server.local_addr().unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let membership_for_server = membership.clone();
+    let server_thread = thread::spawn(move || {
+        let db = TempDb::new();
+        let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+        let mut peer = DurablePaxosPeer::new(voter("b"));
+        let served = server
+            .serve_durable_until(
+                &mut peer,
+                &membership_for_server,
+                &mut store,
+                &server_shutdown,
+            )
+            .unwrap();
+        (served, store.commit_index().unwrap())
+    });
+
+    let client = TcpRpcClient::new(Duration::from_secs(2));
+    for slot in 1..=3 {
+        let ballot = Ballot::new(slot, voter("a"));
+        let response = client
+            .request(
+                address,
+                PaxosRpc::Prepare(PrepareRequest {
+                    slot,
+                    ballot: ballot.clone(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            response,
+            PaxosRpc::Promise(PromiseResponse::Promised {
+                slot,
+                ballot,
+                voter: voter("b"),
+                accepted: None,
+            })
+        );
+    }
+    shutdown.store(true, Ordering::Release);
+    assert_eq!(server_thread.join().unwrap(), (3, 0));
+}
+
+#[test]
+fn long_lived_durable_server_can_stop_while_idle() {
+    let membership = stable_quorum(&[("a", 1), ("b", 1), ("c", 1)]);
+    let server =
+        TcpRpcServer::bind("127.0.0.1:0".parse().unwrap(), Duration::from_secs(2)).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server_thread = thread::spawn(move || {
+        let db = TempDb::new();
+        let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+        let mut peer = DurablePaxosPeer::new(voter("b"));
+        server
+            .serve_durable_until(&mut peer, &membership, &mut store, &server_shutdown)
+            .unwrap()
+    });
+
+    shutdown.store(true, Ordering::Release);
+    assert_eq!(server_thread.join().unwrap(), 0);
 }
 
 #[test]

@@ -356,3 +356,84 @@ fn durable_accept_cannot_overwrite_a_previously_learned_chosen_value() {
     let acceptor = WeightedAcceptor::restore(voter("c"), &store).unwrap();
     assert!(acceptor.accepted(1).is_none());
 }
+
+#[test]
+fn ballot_round_allocation_moves_above_saved_and_observed_rounds() {
+    let db = TempDb::new();
+    let proposer = voter("a");
+    let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+
+    assert_eq!(store.next_ballot_round(&proposer).unwrap(), 1);
+    assert_eq!(store.next_ballot_round_after(&proposer, 20).unwrap(), 21);
+    assert_eq!(store.next_ballot_round_after(&proposer, 7).unwrap(), 22);
+    drop(store);
+
+    let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+    assert_eq!(store.next_ballot_round(&proposer).unwrap(), 23);
+}
+
+#[test]
+fn ballot_round_overflow_does_not_replace_the_durable_counter() {
+    let db = TempDb::new();
+    let proposer = voter("a");
+    let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+    assert_eq!(store.next_ballot_round(&proposer).unwrap(), 1);
+
+    assert!(matches!(
+        store.next_ballot_round_after(&proposer, u64::MAX),
+        Err(PaxosStorageError::BallotRoundOverflow)
+    ));
+    assert_eq!(store.next_ballot_round(&proposer).unwrap(), 2);
+}
+
+#[test]
+fn application_cursor_advances_only_one_committed_slot_and_survives_reopen() {
+    let db = TempDb::new();
+    let membership = stable_quorum(&[("a", 1), ("b", 1), ("c", 1)]);
+    {
+        let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+        let mut acceptor = WeightedAcceptor::new(voter("a"));
+        acceptor
+            .handle_learn_durable(chosen(1, b"one"), &membership, &mut store)
+            .unwrap();
+
+        assert!(matches!(
+            store.mark_applied(2),
+            Err(PaxosStorageError::AppliedSlotOutOfOrder {
+                expected: 1,
+                actual: 2
+            })
+        ));
+        assert_eq!(store.applied_index().unwrap(), 0);
+        store.mark_applied(1).unwrap();
+        assert!(matches!(
+            store.mark_applied(2),
+            Err(PaxosStorageError::AppliedBeyondCommitIndex {
+                slot: 2,
+                commit_index: 1
+            })
+        ));
+        assert_eq!(store.applied_index().unwrap(), 1);
+    }
+
+    let store = SqlitePaxosStore::open(db.path()).unwrap();
+    assert_eq!(store.applied_index().unwrap(), 1);
+}
+
+#[test]
+fn schema_v2_migrates_application_cursor_to_zero() {
+    let db = TempDb::new();
+    {
+        let _store = SqlitePaxosStore::open(db.path()).unwrap();
+    }
+    {
+        let connection = Connection::open(db.path()).unwrap();
+        connection
+            .execute("ALTER TABLE consensus_meta DROP COLUMN applied_index", [])
+            .unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+    }
+
+    let store = SqlitePaxosStore::open(db.path()).unwrap();
+    assert_eq!(store.applied_index().unwrap(), 0);
+}

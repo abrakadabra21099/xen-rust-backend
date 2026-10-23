@@ -24,6 +24,14 @@ pub enum PaxosStorageError {
         commit_index: PaxosSlot,
     },
     MissingCommittedValue(PaxosSlot),
+    AppliedSlotOutOfOrder {
+        expected: PaxosSlot,
+        actual: PaxosSlot,
+    },
+    AppliedBeyondCommitIndex {
+        slot: PaxosSlot,
+        commit_index: PaxosSlot,
+    },
 }
 
 impl std::fmt::Display for PaxosStorageError {
@@ -47,6 +55,14 @@ impl std::fmt::Display for PaxosStorageError {
             Self::MissingCommittedValue(slot) => {
                 write!(f, "committed log slot {slot} has no learned value")
             }
+            Self::AppliedSlotOutOfOrder { expected, actual } => write!(
+                f,
+                "application cursor expected slot {expected}, got slot {actual}"
+            ),
+            Self::AppliedBeyondCommitIndex { slot, commit_index } => write!(
+                f,
+                "cannot apply slot {slot} beyond commit index {commit_index}"
+            ),
         }
     }
 }
@@ -114,11 +130,12 @@ impl SqlitePaxosStore {
                      );
                      CREATE TABLE consensus_meta (
                          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                         commit_index BLOB NOT NULL CHECK(length(commit_index) = 8)
+                         commit_index BLOB NOT NULL CHECK(length(commit_index) = 8),
+                         applied_index BLOB NOT NULL CHECK(length(applied_index) = 8)
                      );
-                     INSERT INTO consensus_meta(singleton, commit_index)
-                         VALUES (1, X'0000000000000000');
-                     PRAGMA user_version = 2;
+                     INSERT INTO consensus_meta(singleton, commit_index, applied_index)
+                         VALUES (1, X'0000000000000000', X'0000000000000000');
+                     PRAGMA user_version = 3;
                      COMMIT;",
                 )?;
             }
@@ -127,15 +144,27 @@ impl SqlitePaxosStore {
                     "BEGIN IMMEDIATE;
                      CREATE TABLE consensus_meta (
                          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                         commit_index BLOB NOT NULL CHECK(length(commit_index) = 8)
+                         commit_index BLOB NOT NULL CHECK(length(commit_index) = 8),
+                         applied_index BLOB NOT NULL CHECK(length(applied_index) = 8)
                      );
-                     INSERT INTO consensus_meta(singleton, commit_index)
-                         VALUES (1, X'0000000000000000');
-                     PRAGMA user_version = 2;
+                     INSERT INTO consensus_meta(singleton, commit_index, applied_index)
+                         VALUES (1, X'0000000000000000', X'0000000000000000');
+                     PRAGMA user_version = 3;
                      COMMIT;",
                 )?;
             }
-            2 => {}
+            2 => {
+                connection.execute_batch(
+                    "BEGIN IMMEDIATE;
+                     ALTER TABLE consensus_meta
+                         ADD COLUMN applied_index BLOB NOT NULL
+                         DEFAULT X'0000000000000000'
+                         CHECK(length(applied_index) = 8);
+                     PRAGMA user_version = 3;
+                     COMMIT;",
+                )?;
+            }
+            3 => {}
             other => return Err(PaxosStorageError::UnsupportedSchemaVersion(other)),
         }
 
@@ -153,6 +182,16 @@ impl SqlitePaxosStore {
     /// Callers must use the returned round in the ballot and must not reuse it
     /// for another proposal after a restart.
     pub fn next_ballot_round(&mut self, proposer: &VoterId) -> Result<u64, PaxosStorageError> {
+        self.next_ballot_round_after(proposer, 0)
+    }
+
+    /// Returns a durable round greater than both the saved counter and an
+    /// observed preempting round.
+    pub fn next_ballot_round_after(
+        &mut self,
+        proposer: &VoterId,
+        observed_round: u64,
+    ) -> Result<u64, PaxosStorageError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -163,12 +202,11 @@ impl SqlitePaxosStore {
                 |row| row.get(0),
             )
             .optional()?;
-        let round = match previous {
-            Some(encoded) => decode_u64(encoded)?
-                .checked_add(1)
-                .ok_or(PaxosStorageError::BallotRoundOverflow)?,
-            None => 1,
-        };
+        let previous_round = previous.map(decode_u64).transpose()?.unwrap_or(0);
+        let round = previous_round
+            .max(observed_round)
+            .checked_add(1)
+            .ok_or(PaxosStorageError::BallotRoundOverflow)?;
         transaction.execute(
             "INSERT INTO ballot_counters(proposer, last_round) VALUES (?1, ?2)
              ON CONFLICT(proposer) DO UPDATE SET last_round = excluded.last_round",
@@ -220,6 +258,61 @@ impl SqlitePaxosStore {
             |row| row.get(0),
         )?;
         decode_u64(encoded)
+    }
+
+    /// Highest contiguous committed slot successfully delivered to the local
+    /// application state machine.
+    pub fn applied_index(&self) -> Result<PaxosSlot, PaxosStorageError> {
+        let encoded: Vec<u8> = self.connection.query_row(
+            "SELECT applied_index FROM consensus_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        decode_u64(encoded)
+    }
+
+    /// Advances the durable application cursor by exactly one committed slot.
+    /// The application effect must succeed before this call; consumers should
+    /// make their effect idempotent by slot to tolerate a crash before cursor
+    /// advancement.
+    pub fn mark_applied(&mut self, slot: PaxosSlot) -> Result<(), PaxosStorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let encoded_applied: Vec<u8> = transaction.query_row(
+            "SELECT applied_index FROM consensus_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let applied_index = decode_u64(encoded_applied)?;
+        let expected =
+            applied_index
+                .checked_add(1)
+                .ok_or(PaxosStorageError::AppliedSlotOutOfOrder {
+                    expected: applied_index,
+                    actual: slot,
+                })?;
+        if slot != expected {
+            return Err(PaxosStorageError::AppliedSlotOutOfOrder {
+                expected,
+                actual: slot,
+            });
+        }
+        let encoded_commit: Vec<u8> = transaction.query_row(
+            "SELECT commit_index FROM consensus_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let commit_index = decode_u64(encoded_commit)?;
+        if slot > commit_index {
+            return Err(PaxosStorageError::AppliedBeyondCommitIndex { slot, commit_index });
+        }
+        transaction.execute(
+            "UPDATE consensus_meta SET applied_index = ?1 WHERE singleton = 1",
+            [encode_u64(slot).as_slice()],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Returns a learned value for recovery/replay, if this slot is known.

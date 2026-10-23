@@ -72,27 +72,40 @@ replay from that prefix after restart, and `committed_values_after` reads the
 prefix in bounded ordered batches. It rejects cursors beyond the commit index
 and reports missing data inside the prefix as corruption instead of skipping a
 slot. SQLite's `FULL` setting synchronizes the WAL at transaction commit,
-subject to the filesystem and storage device honoring sync requests.
-State-machine application and its index are not persisted yet.
+subject to the filesystem and storage device honoring sync requests. Schema v3
+also persists the ordered application cursor. `src/cluster/application.rs`
+delivers each committed opaque value to a pluggable state machine before
+advancing that cursor. The callback may be invoked again if the process crashes
+after its effect but before the cursor transaction; implementations must be
+idempotent by log slot. Concrete Xen command encoding and atomic application
+state persistence are not defined yet.
 
 `src/cluster/transport.rs` defines the version 1 cleartext binary message format
 for prepare, promise, accept, accepted, learn, and learned RPCs. It bounds
 message sizes, voter IDs, and certificate lengths and rejects malformed or
 trailing data. `src/cluster/transport/tcp.rs` sends a length-prefixed request
 and matching response over one TCP connection, with read/write timeouts. Its
-server handles one connection at a time per `serve_one` call; the caller owns
-the accept loop and concurrency. `serve_durable_one` routes inbound messages to
-`DurablePaxosPeer`, which only replies after the acceptor operation and SQLite
-transaction succeed. Peer authentication and encryption remain outside this
-MVP transport.
+server's `serve_durable_until` method owns an accept loop with a shutdown flag,
+but handles connections serially because the acceptor and SQLite store are
+mutable node-local state. A connection or protocol error exits the loop; the
+process supervisor must restart it. `serve_durable_one` routes inbound messages
+to `DurablePaxosPeer`, which only replies after the acceptor operation and
+SQLite transaction succeed. Peer authentication and encryption remain outside
+this MVP transport.
 
 `src/cluster/paxos_round.rs` starts a networked one-slot proposal from any voter.
 It sends requests concurrently, stops each phase after reaching its quorum,
 and reports separately whether Learn was durably acknowledged by a quorum.
-The ballot still must come from the caller's durable counter. This driver does
-not allocate log slots or retry a request in another slot after preemption.
+`src/cluster/paxos_log.rs` builds a bounded client-operation coordinator on top:
+it allocates slots from the local contiguous commit index and ballots from the
+durable counter, retries a preempted ballot above the observed promised round,
+and durably learns a conflicting chosen value before retrying the requested
+value in a later slot. It returns success only after the value is learned
+locally and Learn acknowledgements establish a quorum. Submissions must be
+serialized per process. The caller remains responsible for operation IDs and
+deduplication if a client retries after losing a response or restarting.
 
-A complete runtime still has to run a long-lived concurrent server, coordinate
-client operations across ordered slots, apply committed values, and expose the
-API on every control-plane node. Client requests may enter on any such node.
+A complete runtime still has to run a concurrent server, define and persist
+concrete application state, and expose the API on every control-plane node.
+Client requests may enter on any such node.
 Worker execution and `libxl` integration are also not implemented.

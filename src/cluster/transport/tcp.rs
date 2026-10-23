@@ -3,6 +3,8 @@
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
     time::Duration,
 };
 
@@ -155,18 +157,7 @@ impl TcpRpcServer {
     {
         let (mut stream, _) = self.listener.accept()?;
         configure_stream(&stream, self.timeout)?;
-        let request = read_frame(&mut stream)?;
-        if !request.is_request() {
-            return Err(TcpRpcError::UnexpectedRequest);
-        }
-        let response = handler(request.clone()).map_err(TcpRpcError::Handler)?;
-        if !response.is_response() {
-            return Err(TcpRpcError::UnexpectedResponse);
-        }
-        if !request.response_matches(&response) {
-            return Err(TcpRpcError::MismatchedResponse);
-        }
-        write_frame(&mut stream, &response)
+        serve_connection(&mut stream, handler)
     }
 
     /// Serves one request through a durable local acceptor and replies after its
@@ -182,6 +173,63 @@ impl TcpRpcServer {
                 .map_err(|error| error.to_string())
         })
     }
+
+    /// Serves durable peer RPCs until `shutdown` is set, returning the number
+    /// of successfully answered requests. The listener is polled at 10 ms
+    /// intervals so an idle server can stop without an extra connection.
+    /// Requests are handled serially because the acceptor and SQLite store are
+    /// node-local mutable state.
+    pub fn serve_durable_until(
+        &self,
+        peer: &mut DurablePaxosPeer,
+        membership: &MembershipQuorum,
+        store: &mut SqlitePaxosStore,
+        shutdown: &AtomicBool,
+    ) -> Result<usize, TcpRpcError> {
+        self.listener.set_nonblocking(true)?;
+        let result = (|| {
+            let mut served = 0;
+            loop {
+                if shutdown.load(Ordering::Acquire) {
+                    return Ok(served);
+                }
+                match self.listener.accept() {
+                    Ok((mut stream, _)) => {
+                        configure_stream(&stream, self.timeout)?;
+                        serve_connection(&mut stream, |request| {
+                            peer.handle_rpc(request, membership, store)
+                                .map_err(|error| error.to_string())
+                        })?;
+                        served += 1;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(TcpRpcError::Io(error)),
+                }
+            }
+        })();
+        self.listener.set_nonblocking(false)?;
+        result
+    }
+}
+
+fn serve_connection<F>(stream: &mut TcpStream, handler: F) -> Result<(), TcpRpcError>
+where
+    F: FnOnce(PaxosRpc) -> Result<PaxosRpc, String>,
+{
+    let request = read_frame(stream)?;
+    if !request.is_request() {
+        return Err(TcpRpcError::UnexpectedRequest);
+    }
+    let response = handler(request.clone()).map_err(TcpRpcError::Handler)?;
+    if !response.is_response() {
+        return Err(TcpRpcError::UnexpectedResponse);
+    }
+    if !request.response_matches(&response) {
+        return Err(TcpRpcError::MismatchedResponse);
+    }
+    write_frame(stream, &response)
 }
 
 fn configure_stream(stream: &TcpStream, timeout: Duration) -> Result<(), TcpRpcError> {
