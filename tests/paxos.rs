@@ -360,6 +360,45 @@ fn chosen_certificate_requires_a_quorum_and_conflicts_are_rejected() {
 }
 
 #[test]
+fn acceptor_never_accepts_a_different_value_after_learning_a_chosen_value() {
+    let membership = stable_quorum(&[("a", 1), ("b", 1), ("c", 1)]);
+    let chosen = ChosenValue {
+        slot: 1,
+        ballot: Ballot::new(1, voter("a")),
+        value: b"chosen".to_vec(),
+        acceptors: [voter("a"), voter("b")].into_iter().collect(),
+    };
+    let mut acceptor = WeightedAcceptor::new(voter("c"));
+    acceptor.handle_learn(chosen.clone(), &membership).unwrap();
+
+    assert_eq!(
+        acceptor.handle_accept(
+            AcceptRequest {
+                slot: 1,
+                ballot: Ballot::new(2, voter("c")),
+                value: b"conflicting".to_vec(),
+            },
+            &membership,
+        ),
+        Err(PaxosError::ConflictingChosenValue(1))
+    );
+    assert_eq!(acceptor.chosen(1), Some(&chosen));
+    assert!(acceptor.accepted(1).is_none());
+
+    assert!(matches!(
+        acceptor.handle_accept(
+            AcceptRequest {
+                slot: 1,
+                ballot: Ballot::new(2, voter("c")),
+                value: b"chosen".to_vec(),
+            },
+            &membership,
+        ),
+        Ok(AcceptedResponse::Accepted { .. })
+    ));
+}
+
+#[test]
 fn joint_membership_requires_each_side_of_quorum_for_choice() {
     let old = common::membership(&[("a", 1), ("b", 1), ("c", 1)]);
     let joint = old

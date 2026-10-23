@@ -321,3 +321,38 @@ fn durable_learn_rejects_a_certificate_below_quorum() {
     assert_eq!(store.commit_index().unwrap(), 0);
     assert_eq!(store.chosen_value(1).unwrap(), None);
 }
+
+#[test]
+fn durable_accept_cannot_overwrite_a_previously_learned_chosen_value() {
+    let db = TempDb::new();
+    let membership = stable_quorum(&[("a", 1), ("b", 1), ("c", 1)]);
+    let learned = chosen(1, b"chosen");
+    {
+        let mut store = SqlitePaxosStore::open(db.path()).unwrap();
+        let mut acceptor = WeightedAcceptor::new(voter("c"));
+        acceptor
+            .handle_learn_durable(learned.clone(), &membership, &mut store)
+            .unwrap();
+
+        assert!(matches!(
+            acceptor.handle_accept_durable(
+                AcceptRequest {
+                    slot: 1,
+                    ballot: Ballot::new(2, voter("c")),
+                    value: b"conflicting".to_vec(),
+                },
+                &membership,
+                &mut store,
+            ),
+            Err(PaxosStorageError::Protocol(
+                PaxosError::ConflictingChosenValue(1)
+            ))
+        ));
+        assert_eq!(store.commit_index().unwrap(), 1);
+    }
+
+    let store = SqlitePaxosStore::open(db.path()).unwrap();
+    assert_eq!(store.chosen_value(1).unwrap(), Some(learned));
+    let acceptor = WeightedAcceptor::restore(voter("c"), &store).unwrap();
+    assert!(acceptor.accepted(1).is_none());
+}

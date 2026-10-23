@@ -86,7 +86,13 @@ the accept loop and concurrency. `serve_durable_one` routes inbound messages to
 transaction succeed. Peer authentication and encryption remain outside this
 MVP transport.
 
-A complete runtime still has to coordinate and recover multiple slots in
-order, apply committed values, transport RPCs over sockets, authenticate peers,
-and expose the API on every control-plane node. Client requests may enter on any
-such node. Worker execution and `libxl` integration are also not implemented.
+`src/cluster/paxos_round.rs` starts a networked one-slot proposal from any voter.
+It sends requests concurrently, stops each phase after reaching its quorum,
+and reports separately whether Learn was durably acknowledged by a quorum.
+The ballot still must come from the caller's durable counter. This driver does
+not allocate log slots or retry a request in another slot after preemption.
+
+A complete runtime still has to run a long-lived concurrent server, coordinate
+client operations across ordered slots, apply committed values, and expose the
+API on every control-plane node. Client requests may enter on any such node.
+Worker execution and `libxl` integration are also not implemented.

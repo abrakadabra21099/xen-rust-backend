@@ -286,6 +286,14 @@ impl WeightedAcceptor {
             });
         }
 
+        if state
+            .chosen
+            .as_ref()
+            .is_some_and(|chosen| chosen.value != request.value)
+        {
+            return Err(PaxosError::ConflictingChosenValue(request.slot));
+        }
+
         if let Some(accepted) = &state.accepted {
             if accepted.ballot == request.ballot && accepted.value != request.value {
                 return Err(PaxosError::ConflictingAcceptedValue(request.ballot));
@@ -327,6 +335,13 @@ impl WeightedAcceptor {
                     voter: node_id.clone(),
                     promised: state.promised.clone().expect("promise checked above"),
                 });
+            }
+            if state
+                .chosen
+                .as_ref()
+                .is_some_and(|chosen| chosen.value != request.value)
+            {
+                return Err(PaxosError::ConflictingChosenValue(slot));
             }
             if let Some(accepted) = &state.accepted {
                 if accepted.ballot == request.ballot && accepted.value != request.value {

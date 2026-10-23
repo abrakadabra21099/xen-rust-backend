@@ -9,6 +9,7 @@ use std::{
 use super::{PaxosRpc, RpcCodecError, MAX_MESSAGE_BYTES};
 use crate::cluster::{
     membership_state::MembershipQuorum, paxos_storage::SqlitePaxosStore, peer::DurablePaxosPeer,
+    weighted_quorum::VoterId,
 };
 
 /// Failures while sending or serving one framed TCP RPC.
@@ -20,6 +21,7 @@ pub enum TcpRpcError {
     UnexpectedRequest,
     UnexpectedResponse,
     MismatchedResponse,
+    PeerIdentityMismatch { expected: VoterId, actual: VoterId },
     Handler(String),
 }
 
@@ -37,6 +39,12 @@ impl std::fmt::Display for TcpRpcError {
             Self::UnexpectedRequest => write!(f, "TCP RPC message is not a request"),
             Self::UnexpectedResponse => write!(f, "TCP RPC handler returned a request"),
             Self::MismatchedResponse => write!(f, "TCP RPC response does not match its request"),
+            Self::PeerIdentityMismatch { expected, actual } => write!(
+                f,
+                "TCP RPC endpoint for {} returned a response claiming to be {}",
+                expected.as_str(),
+                actual.as_str()
+            ),
             Self::Handler(message) => write!(f, "TCP RPC handler failed: {message}"),
         }
     }
@@ -70,6 +78,28 @@ impl TcpRpcClient {
 
     /// Sends a request and validates that the peer returned the matching response.
     pub fn request(&self, address: SocketAddr, request: PaxosRpc) -> Result<PaxosRpc, TcpRpcError> {
+        self.request_inner(address, request, None)
+    }
+
+    /// Sends a request and checks the voter ID claimed in the response.
+    ///
+    /// This detects endpoint misconfiguration but is not cryptographic
+    /// authentication; an untrusted peer can still claim another identity.
+    pub fn request_to(
+        &self,
+        expected_peer: &VoterId,
+        address: SocketAddr,
+        request: PaxosRpc,
+    ) -> Result<PaxosRpc, TcpRpcError> {
+        self.request_inner(address, request, Some(expected_peer))
+    }
+
+    fn request_inner(
+        &self,
+        address: SocketAddr,
+        request: PaxosRpc,
+        expected_peer: Option<&VoterId>,
+    ) -> Result<PaxosRpc, TcpRpcError> {
         if !request.is_request() {
             return Err(TcpRpcError::UnexpectedRequest);
         }
@@ -82,6 +112,16 @@ impl TcpRpcClient {
         }
         if !request.response_matches(&response) {
             return Err(TcpRpcError::MismatchedResponse);
+        }
+        if let Some(expected) = expected_peer {
+            if let Some(actual) = response.response_voter() {
+                if expected != actual {
+                    return Err(TcpRpcError::PeerIdentityMismatch {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    });
+                }
+            }
         }
         Ok(response)
     }

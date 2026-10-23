@@ -227,6 +227,17 @@ impl PaxosRpc {
         )
     }
 
+    fn response_voter(&self) -> Option<&VoterId> {
+        match self {
+            Self::Promise(PromiseResponse::Promised { voter, .. })
+            | Self::Promise(PromiseResponse::Rejected { voter, .. })
+            | Self::Accepted(AcceptedResponse::Accepted { voter, .. })
+            | Self::Accepted(AcceptedResponse::Rejected { voter, .. })
+            | Self::Learned { voter, .. } => Some(voter),
+            _ => None,
+        }
+    }
+
     fn response_matches(&self, response: &Self) -> bool {
         match (self, response) {
             (

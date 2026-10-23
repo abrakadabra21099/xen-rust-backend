@@ -229,6 +229,10 @@ fn client_rejects_a_peer_that_sends_a_request_instead_of_a_response() {
     let peer_address = address(&listener);
     let server_thread = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        let mut prefix = [0; 4];
+        std::io::Read::read_exact(&mut stream, &mut prefix).unwrap();
+        let mut payload = vec![0; u32::from_be_bytes(prefix) as usize];
+        std::io::Read::read_exact(&mut stream, &mut payload).unwrap();
         send_raw_message(
             &mut stream,
             &PaxosRpc::Prepare(PrepareRequest {
@@ -313,6 +317,43 @@ fn client_rejects_a_peer_response_for_another_slot() {
     assert!(matches!(
         TcpRpcClient::new(Duration::from_secs(2)).request(peer_address, request),
         Err(TcpRpcError::MismatchedResponse)
+    ));
+    server_thread.join().unwrap();
+}
+
+#[test]
+fn client_rejects_a_response_claiming_the_wrong_peer_identity() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer_address = address(&listener);
+    let server_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut prefix = [0; 4];
+        std::io::Read::read_exact(&mut stream, &mut prefix).unwrap();
+        let mut payload = vec![0; u32::from_be_bytes(prefix) as usize];
+        std::io::Read::read_exact(&mut stream, &mut payload).unwrap();
+        send_raw_message(
+            &mut stream,
+            &PaxosRpc::Promise(PromiseResponse::Promised {
+                slot: 1,
+                ballot: Ballot::new(1, voter("node-a")),
+                voter: voter("node-c"),
+                accepted: None,
+            }),
+        );
+    });
+
+    let request = PaxosRpc::Prepare(PrepareRequest {
+        slot: 1,
+        ballot: Ballot::new(1, voter("node-a")),
+    });
+    assert!(matches!(
+        TcpRpcClient::new(Duration::from_secs(2)).request_to(
+            &voter("node-b"),
+            peer_address,
+            request
+        ),
+        Err(TcpRpcError::PeerIdentityMismatch { expected, actual })
+            if expected == voter("node-b") && actual == voter("node-c")
     ));
     server_thread.join().unwrap();
 }
